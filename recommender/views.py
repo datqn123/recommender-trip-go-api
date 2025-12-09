@@ -1,6 +1,7 @@
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
-from .models import Hotels, HotelsAmenities, Amenities, Locations, HotelViews, ViewHistories, FavoriteHotels, Bookings, HotelReviews
+from .models import Hotels, HotelsAmenities, Amenities, Locations, HotelViews, ViewHistories, FavoriteHotels, Bookings, HotelReviews, SearchHistory
+from collections import Counter
 import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import linear_kernel
@@ -58,7 +59,7 @@ def train_model():
     df_hotels['views'] = df_hotels['id'].map(hotel_views).fillna('')
 
     # Tăng trọng số của những từ quan trọng hơn để có đc weight cao
-    location_weights = (df_hotels['location__name'].fillna('')+ " ") * 3
+    location_weights = (df_hotels['location__name'].fillna('')+ " ")
     price_weights = (df_hotels['price_range'].fillna('')+ " ") * 2
     type_weights = (df_hotels['type'].fillna('')+ " ") * 2
     
@@ -190,131 +191,6 @@ def get_recommendations(request, hotel_id):
         return Response({"error": str(e)}, status=500)
 
 
-@api_view(['GET'])
-def get_popular_hotels(request):
-    """API lấy hotels phổ biến (theo rating và reviews)"""
-    try:
-        limit = int(request.query_params.get('limit', 10))
-        
-        hotels = Hotels.objects.select_related('location').filter(
-            average_rating__isnull=False
-        ).order_by('-average_rating', '-total_reviews')[:limit]
-        
-        results = []
-        for hotel in hotels:
-            results.append({
-                'id': hotel.id,
-                'name': hotel.name,
-                'address': hotel.address,
-                'star_rating': hotel.star_rating,
-                'average_rating': hotel.average_rating,
-                'total_reviews': hotel.total_reviews,
-                'location': hotel.location.name if hotel.location else None
-            })
-        
-        return Response({"popular_hotels": results})
-        
-    except Exception as e:
-        return Response({"error": str(e)}, status=500)
-
-
-# --- PHASE 2: HYBRID RECOMMENDATIONS ---
-
-@api_view(['GET'])
-def get_user_recommendations(request, user_id):
-    """
-    API gợi ý hotels cá nhân hóa cho user cụ thể
-    Dựa trên User-Based Collaborative Filtering
-    """
-    try:
-        user_id = int(user_id)
-        limit = int(request.query_params.get('limit', 10))
-        
-        from .hybrid import get_personalized_recommendations
-        
-        recommendations = get_personalized_recommendations(user_id, limit)
-        
-        if not recommendations:
-            return Response({
-                "user_id": user_id,
-                "message": "Không đủ dữ liệu để gợi ý. Hãy xem và đánh giá thêm hotels!",
-                "recommendations": []
-            })
-        
-        return Response({
-            "user_id": user_id,
-            "recommendation_type": "personalized",
-            "recommendations": recommendations
-        })
-        
-    except Exception as e:
-        return Response({"error": str(e)}, status=500)
-
-
-@api_view(['GET'])
-def get_hybrid_recommendations(request, hotel_id):
-    """
-    API gợi ý hotels kết hợp Content-Based và Collaborative Filtering
-    Query params:
-        - user_id: Optional, để personalize recommendations
-        - content_weight: Trọng số Content-Based (mặc định 0.5)
-        - collab_weight: Trọng số Collaborative (mặc định 0.5)
-        - limit: Số lượng kết quả (mặc định 10)
-    """
-    try:
-        hotel_id = int(hotel_id)
-        user_id = request.query_params.get('user_id')
-        if user_id:
-            user_id = int(user_id)
-        
-        content_weight = float(request.query_params.get('content_weight', 0.5))
-        collab_weight = float(request.query_params.get('collab_weight', 0.5))
-        limit = int(request.query_params.get('limit', 10))
-        
-        from .hybrid import get_hybrid_recommendations as hybrid_recs
-        from .models import Hotels
-        
-        recommendations = hybrid_recs(
-            hotel_id=hotel_id,
-            user_id=user_id,
-            content_weight=content_weight,
-            collab_weight=collab_weight,
-            limit=limit
-        )
-        
-        # Enrich với hotel info
-        if recommendations:
-            hotel_ids = [rec['hotel_id'] for rec in recommendations]
-            hotels = Hotels.objects.filter(id__in=hotel_ids).select_related('location').values(
-                'id', 'name', 'address', 'star_rating', 'average_rating', 'location__name'
-            )
-            hotels_dict = {h['id']: h for h in hotels}
-            
-            for rec in recommendations:
-                hotel_info = hotels_dict.get(rec['hotel_id'], {})
-                rec['name'] = hotel_info.get('name')
-                rec['address'] = hotel_info.get('address')
-                rec['star_rating'] = hotel_info.get('star_rating')
-                rec['average_rating'] = hotel_info.get('average_rating')
-                rec['location'] = hotel_info.get('location__name')
-        
-        # Lấy thông tin source hotel
-        source_hotel = Hotels.objects.filter(id=hotel_id).values('id', 'name').first()
-        
-        return Response({
-            "source_hotel_id": hotel_id,
-            "source_hotel_name": source_hotel.get('name') if source_hotel else None,
-            "user_id": user_id,
-            "weights": {
-                "content_based": content_weight,
-                "collaborative": collab_weight
-            },
-            "recommendations": recommendations
-        })
-        
-    except Exception as e:
-        return Response({"error": str(e)}, status=500)
-
 
 @api_view(['POST'])
 def retrain_model(request):
@@ -334,3 +210,264 @@ def retrain_model(request):
         })
     except Exception as e:
         return Response({"error": str(e)}, status=500)
+
+
+# --- PHASE 3: SEARCH-BASED RECOMMENDATIONS ---
+
+def is_cold_start_user(user_id):
+    """
+    Kiểm tra user có phải cold start không.
+    Cold start = không có dữ liệu ở BẤT KỲ nguồn nào
+    """
+    has_search = SearchHistory.objects.filter(account_id=user_id).exists()
+    has_views = ViewHistories.objects.filter(account_id=user_id).exists()
+    has_favorites = FavoriteHotels.objects.filter(account_id=user_id).exists()
+    has_bookings = Bookings.objects.filter(user_id=user_id).exists()
+    has_reviews = HotelReviews.objects.filter(user_id=user_id).exists()
+    
+    return not any([has_search, has_views, has_favorites, has_bookings, has_reviews])
+
+
+def get_popular_hotels_list(limit=10):
+    """
+    Helper: Lấy danh sách popular hotels sử dụng HYBRID APPROACH
+    Kết hợp các thuật toán đã tạo trong collaborative.py và hybrid.py:
+    - Item-Based CF scores (từ collaborative.py)
+    - Rating-based popularity
+    - Booking/View/Favorite counts để tính overall popularity
+    """
+    from . import collaborative
+    from django.db.models import Count
+    
+    # 1. Lấy tất cả hotels với rating
+    hotels = Hotels.objects.select_related('location').filter(
+        average_rating__isnull=False
+    ).order_by('-average_rating', '-total_reviews')
+    
+    if not hotels.exists():
+        return []
+    
+    # 2. Lấy collaborative filtering signals nếu có
+    cf_hotel_scores = {}
+    if collaborative.cf_global_data:
+        # Lấy các hotels được nhiều users yêu thích (từ user-item matrix)
+        user_item_matrix = collaborative.cf_global_data.get('user_item_matrix')
+        if user_item_matrix is not None:
+            # Tính tổng ratings cho mỗi hotel = popularity dựa trên CF
+            hotel_popularity = user_item_matrix.sum(axis=0)  # Sum over all users
+            max_pop = hotel_popularity.max() if hotel_popularity.max() > 0 else 1
+            
+            for hotel_id in user_item_matrix.columns:
+                cf_hotel_scores[hotel_id] = float(hotel_popularity[hotel_id]) / max_pop
+    
+    # 3. Lấy booking/view/favorite counts
+    booking_counts = dict(
+        Bookings.objects.values('room__hotel_id').annotate(
+            count=Count('id')
+        ).values_list('room__hotel_id', 'count')
+    )
+    view_counts = dict(
+        ViewHistories.objects.values('hotel_id').annotate(
+            count=Count('id')
+        ).values_list('hotel_id', 'count')
+    )
+    favorite_counts = dict(
+        FavoriteHotels.objects.values('hotel_id').annotate(
+            count=Count('id')
+        ).values_list('hotel_id', 'count')
+    )
+    
+    max_booking = max(booking_counts.values()) if booking_counts else 1
+    max_view = max(view_counts.values()) if view_counts else 1
+    max_favorite = max(favorite_counts.values()) if favorite_counts else 1
+    
+    # 4. Tính hybrid popularity score
+    scored_hotels = []
+    for hotel in hotels:
+        # CF score (từ collaborative.py)
+        cf_score = cf_hotel_scores.get(hotel.id, 0) * 3.0  # Weight = 3
+        
+        # Engagement scores (normalized)
+        booking_score = (booking_counts.get(hotel.id, 0) / max_booking) * 5.0  # Weight = 5
+        view_score = (view_counts.get(hotel.id, 0) / max_view) * 1.0  # Weight = 1
+        favorite_score = (favorite_counts.get(hotel.id, 0) / max_favorite) * 3.0  # Weight = 3
+        
+        # Rating score
+        rating_score = ((hotel.average_rating or 0) / 5.0) * 2.0  # Weight = 2
+        review_score = min((hotel.total_reviews or 0) / 100.0, 1.0) * 1.5  # Cap at 100 reviews
+        
+        # Total hybrid score
+        popularity_score = cf_score + booking_score + view_score + favorite_score + rating_score + review_score
+        
+        scored_hotels.append({
+            'hotel': hotel,
+            'popularity_score': round(popularity_score, 4),
+            'breakdown': {
+                'cf_score': round(cf_score, 4),
+                'booking_score': round(booking_score, 4),
+                'view_score': round(view_score, 4),
+                'favorite_score': round(favorite_score, 4),
+                'rating_score': round(rating_score, 4),
+                'review_score': round(review_score, 4)
+            }
+        })
+    
+    # 5. Sort by hybrid popularity score
+    scored_hotels.sort(key=lambda x: x['popularity_score'], reverse=True)
+    
+    return [{
+        'id': item['hotel'].id,
+        'name': item['hotel'].name,
+        'address': item['hotel'].address,
+        'star_rating': item['hotel'].star_rating,
+        'average_rating': item['hotel'].average_rating,
+        'total_reviews': item['hotel'].total_reviews,
+        'location': item['hotel'].location.name if item['hotel'].location else None,
+        'popularity_score': item['popularity_score'],
+        'score_breakdown': item['breakdown']
+    } for item in scored_hotels[:limit]]
+
+@api_view(['GET'])
+def get_smart_recommendations(request, user_id):
+    """
+    🚀 API CHÍNH CHO GIAO DIỆN HOTEL
+    
+    Lấy hotel recommendations dựa trên:
+    1. ViewHistory của user -> Lấy hotels đã xem
+    2. Đưa vào thuật toán HYBRID (hybrid.py) để tìm similar hotels
+    3. Kết hợp với Collaborative Filtering (collaborative.py)
+    4. Cold start users -> Fallback về popular hotels (hybrid approach)
+    
+    Query params:
+        - limit: Số lượng kết quả (mặc định 10)
+        - content_weight: Trọng số Content-Based (mặc định 0.6)
+        - collab_weight: Trọng số Collaborative (mặc định 0.4)
+    """
+    try:
+        user_id = int(user_id)
+        limit = int(request.query_params.get('limit', 10))
+        content_weight = float(request.query_params.get('content_weight', 0.6))
+        collab_weight = float(request.query_params.get('collab_weight', 0.4))
+        
+        from .hybrid import get_hybrid_recommendations, get_personalized_recommendations
+        from . import collaborative
+        
+        # 1. Kiểm tra cold start
+        if is_cold_start_user(user_id):
+            return Response({
+                "user_id": user_id,
+                "is_cold_start": True,
+                "message": "Chào mừng bạn! Đây là các khách sạn phổ biến được nhiều người yêu thích.",
+                "recommendation_type": "popular_hybrid",
+                "recommendations": get_popular_hotels_list(limit)
+            })
+        
+        # 2. Lấy ViewHistory gần nhất của user (hotels đã xem)
+        recent_views = ViewHistories.objects.filter(
+            account_id=user_id
+        ).select_related('hotel').order_by('-viewed_at')[:5]  # Lấy 5 hotels gần nhất
+        
+        viewed_hotel_ids = [v.hotel_id for v in recent_views if v.hotel_id]
+        
+        # 3. Nếu có ViewHistory -> Sử dụng HYBRID recommendations
+        all_hybrid_recs = {}
+        
+        for hotel_id in viewed_hotel_ids:
+            # Gọi thuật toán hybrid.py cho từng hotel đã xem
+            hybrid_recs = get_hybrid_recommendations(
+                hotel_id=hotel_id,
+                user_id=user_id,
+                content_weight=content_weight,
+                collab_weight=collab_weight,
+                limit=limit
+            )
+            
+            # Merge results (cộng dồn scores)
+            for rec in hybrid_recs:
+                hid = rec['hotel_id']
+                if hid not in viewed_hotel_ids:  # Không gợi ý hotels đã xem
+                    if hid not in all_hybrid_recs:
+                        all_hybrid_recs[hid] = {
+                            'hotel_id': hid,
+                            'hybrid_score': rec['hybrid_score'],
+                            'content_score': rec['content_score'],
+                            'collab_score': rec['collab_score'],
+                            'source_hotels': [hotel_id]
+                        }
+                    else:
+                        # Cộng dồn scores và merge sources
+                        all_hybrid_recs[hid]['hybrid_score'] += rec['hybrid_score']
+                        all_hybrid_recs[hid]['content_score'] += rec['content_score']
+                        all_hybrid_recs[hid]['collab_score'] += rec['collab_score']
+                        all_hybrid_recs[hid]['source_hotels'].append(hotel_id)
+        
+        # 4. Nếu không đủ kết quả từ hybrid -> Thêm personalized CF
+        if len(all_hybrid_recs) < limit:
+            personalized_recs = get_personalized_recommendations(user_id, limit)
+            for rec in personalized_recs:
+                hid = rec.get('hotel_id') or rec.get('id')
+                if hid and hid not in viewed_hotel_ids and hid not in all_hybrid_recs:
+                    all_hybrid_recs[hid] = {
+                        'hotel_id': hid,
+                        'hybrid_score': rec.get('cf_score', 0) * 0.8,  # Slightly lower weight
+                        'content_score': 0,
+                        'collab_score': rec.get('cf_score', 0),
+                        'source_hotels': [],
+                        'from_cf': True
+                    }
+        
+        # 5. Sort và lấy top results
+        sorted_recs = sorted(
+            all_hybrid_recs.values(),
+            key=lambda x: x['hybrid_score'],
+            reverse=True
+        )[:limit]
+        
+        # 6. Enrich với hotel info từ database
+        if sorted_recs:
+            hotel_ids = [rec['hotel_id'] for rec in sorted_recs]
+            hotels = Hotels.objects.filter(id__in=hotel_ids).select_related('location').values(
+                'id', 'name', 'address', 'star_rating', 'average_rating', 'total_reviews', 'location__name'
+            )
+            hotels_dict = {h['id']: h for h in hotels}
+            
+            for rec in sorted_recs:
+                hotel_info = hotels_dict.get(rec['hotel_id'], {})
+                rec['name'] = hotel_info.get('name')
+                rec['address'] = hotel_info.get('address')
+                rec['star_rating'] = hotel_info.get('star_rating')
+                rec['average_rating'] = hotel_info.get('average_rating')
+                rec['total_reviews'] = hotel_info.get('total_reviews')
+                rec['location'] = hotel_info.get('location__name')
+                rec['hybrid_score'] = round(rec['hybrid_score'], 4)
+                rec['content_score'] = round(rec['content_score'], 4)
+                rec['collab_score'] = round(rec['collab_score'], 4)
+        
+        # 7. Lấy thông tin về history patterns cho response
+        user_history = {
+            'viewed_hotels_count': len(viewed_hotel_ids),
+            'recently_viewed': [{
+                'hotel_id': v.hotel_id,
+                'hotel_name': v.hotel.name if v.hotel else None,
+                'viewed_at': v.viewed_at.isoformat() if v.viewed_at else None
+            } for v in recent_views[:3]]  # Top 3 gần nhất
+        }
+        
+        return Response({
+            "user_id": user_id,
+            "is_cold_start": False,
+            "recommendation_type": "hybrid",
+            "algorithm_weights": {
+                "content_based": content_weight,
+                "collaborative": collab_weight
+            },
+            "user_history": user_history,
+            "recommendations": sorted_recs
+        })
+        
+    except Exception as e:
+        import traceback
+        return Response({
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }, status=500)
