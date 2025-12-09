@@ -1,6 +1,6 @@
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
-from .models import Hotels, HotelsAmenities, Amenities, Locations, HotelViews
+from .models import Hotels, HotelsAmenities, Amenities, Locations, HotelViews, ViewHistories, FavoriteHotels, Bookings, HotelReviews
 import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import linear_kernel
@@ -218,11 +218,119 @@ def get_popular_hotels(request):
         return Response({"error": str(e)}, status=500)
 
 
+# --- PHASE 2: HYBRID RECOMMENDATIONS ---
+
+@api_view(['GET'])
+def get_user_recommendations(request, user_id):
+    """
+    API gợi ý hotels cá nhân hóa cho user cụ thể
+    Dựa trên User-Based Collaborative Filtering
+    """
+    try:
+        user_id = int(user_id)
+        limit = int(request.query_params.get('limit', 10))
+        
+        from .hybrid import get_personalized_recommendations
+        
+        recommendations = get_personalized_recommendations(user_id, limit)
+        
+        if not recommendations:
+            return Response({
+                "user_id": user_id,
+                "message": "Không đủ dữ liệu để gợi ý. Hãy xem và đánh giá thêm hotels!",
+                "recommendations": []
+            })
+        
+        return Response({
+            "user_id": user_id,
+            "recommendation_type": "personalized",
+            "recommendations": recommendations
+        })
+        
+    except Exception as e:
+        return Response({"error": str(e)}, status=500)
+
+
+@api_view(['GET'])
+def get_hybrid_recommendations(request, hotel_id):
+    """
+    API gợi ý hotels kết hợp Content-Based và Collaborative Filtering
+    Query params:
+        - user_id: Optional, để personalize recommendations
+        - content_weight: Trọng số Content-Based (mặc định 0.5)
+        - collab_weight: Trọng số Collaborative (mặc định 0.5)
+        - limit: Số lượng kết quả (mặc định 10)
+    """
+    try:
+        hotel_id = int(hotel_id)
+        user_id = request.query_params.get('user_id')
+        if user_id:
+            user_id = int(user_id)
+        
+        content_weight = float(request.query_params.get('content_weight', 0.5))
+        collab_weight = float(request.query_params.get('collab_weight', 0.5))
+        limit = int(request.query_params.get('limit', 10))
+        
+        from .hybrid import get_hybrid_recommendations as hybrid_recs
+        from .models import Hotels
+        
+        recommendations = hybrid_recs(
+            hotel_id=hotel_id,
+            user_id=user_id,
+            content_weight=content_weight,
+            collab_weight=collab_weight,
+            limit=limit
+        )
+        
+        # Enrich với hotel info
+        if recommendations:
+            hotel_ids = [rec['hotel_id'] for rec in recommendations]
+            hotels = Hotels.objects.filter(id__in=hotel_ids).select_related('location').values(
+                'id', 'name', 'address', 'star_rating', 'average_rating', 'location__name'
+            )
+            hotels_dict = {h['id']: h for h in hotels}
+            
+            for rec in recommendations:
+                hotel_info = hotels_dict.get(rec['hotel_id'], {})
+                rec['name'] = hotel_info.get('name')
+                rec['address'] = hotel_info.get('address')
+                rec['star_rating'] = hotel_info.get('star_rating')
+                rec['average_rating'] = hotel_info.get('average_rating')
+                rec['location'] = hotel_info.get('location__name')
+        
+        # Lấy thông tin source hotel
+        source_hotel = Hotels.objects.filter(id=hotel_id).values('id', 'name').first()
+        
+        return Response({
+            "source_hotel_id": hotel_id,
+            "source_hotel_name": source_hotel.get('name') if source_hotel else None,
+            "user_id": user_id,
+            "weights": {
+                "content_based": content_weight,
+                "collaborative": collab_weight
+            },
+            "recommendations": recommendations
+        })
+        
+    except Exception as e:
+        return Response({"error": str(e)}, status=500)
+
+
 @api_view(['POST'])
 def retrain_model(request):
-    """API để retrain model (Gọi khi có hotels mới)"""
+    """API để retrain tất cả models (Content-Based + Collaborative)"""
     try:
+        # Retrain Content-Based (Phase 1)
         train_model()
-        return Response({"message": "Model đã được train lại!"})
+        
+        # Retrain Collaborative Filtering (Phase 2)
+        from .collaborative import train_collaborative_model
+        cf_success = train_collaborative_model()
+        
+        return Response({
+            "message": "Tất cả models đã được train lại!",
+            "content_based": "✅ Success",
+            "collaborative": "✅ Success" if cf_success else "⚠️ Không đủ dữ liệu"
+        })
     except Exception as e:
         return Response({"error": str(e)}, status=500)

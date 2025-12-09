@@ -11,6 +11,7 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 
 from pathlib import Path
+import os
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -20,12 +21,12 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-f#_4rdzn0(kc8$)=j1p^wny==l!2orf71v8jloo&k4u@k!y&+7'
+SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-f#_4rdzn0(kc8$)=j1p^wny==l!2orf71v8jloo&k4u@k!y&+7')
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = os.environ.get('DEBUG', 'True').lower() in ('true', '1', 'yes')
 
-ALLOWED_HOSTS = ['*']
+ALLOWED_HOSTS = os.environ.get('ALLOWED_HOSTS', '*').split(',')
 
 
 # Application definition
@@ -43,6 +44,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',  # Serve static files
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -71,17 +73,17 @@ TEMPLATES = [
 WSGI_APPLICATION = 'tripgo_ai_service.wsgi.application'
 
 
-# Database
+# Database - Support both local and production (via environment variables)
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.mysql',
-        'NAME': 'dacn2',
-        'USER': 'wWM9yCYvFeQVRm2.root',
-        'PASSWORD': 'wfYWzYdqwM5Rcr32',
-        'HOST': 'gateway01.ap-southeast-1.prod.aws.tidbcloud.com',
-        'PORT': '4000',
+        'NAME': os.environ.get('DATABASE_NAME', 'dacn2'),
+        'USER': os.environ.get('DATABASE_USER', 'wWM9yCYvFeQVRm2.root'),
+        'PASSWORD': os.environ.get('DATABASE_PASSWORD', 'wfYWzYdqwM5Rcr32'),
+        'HOST': os.environ.get('DATABASE_HOST', 'gateway01.ap-southeast-1.prod.aws.tidbcloud.com'),
+        'PORT': os.environ.get('DATABASE_PORT', '4000'),
         'OPTIONS': {
             'ssl': {
                 'ssl-mode': 'VERIFY_IDENTITY',
@@ -115,7 +117,7 @@ AUTH_PASSWORD_VALIDATORS = [
 
 LANGUAGE_CODE = 'en-us'
 
-TIME_ZONE = 'UTC'
+TIME_ZONE = 'Asia/Ho_Chi_Minh'
 
 USE_I18N = True
 
@@ -126,6 +128,7 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/5.2/howto/static-files/
 
 STATIC_URL = 'static/'
+STATIC_ROOT = BASE_DIR / 'staticfiles'
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field

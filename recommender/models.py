@@ -503,3 +503,39 @@ class Vouchers(models.Model):
     class Meta:
         managed = False
         db_table = 'vouchers'
+
+
+class ViewHistories(models.Model):
+    """
+    Lịch sử xem chi tiết hotel của user
+    Dùng cho Recommendation System - Collaborative & Content-based Filtering
+    """
+    id = models.BigAutoField(primary_key=True)
+    created_at = models.DateTimeField(blank=True, null=True)
+    updated_at = models.DateTimeField(blank=True, null=True)
+    
+    # Core fields
+    account = models.ForeignKey(Accounts, models.DO_NOTHING)
+    hotel = models.ForeignKey(Hotels, models.DO_NOTHING)
+    viewed_at = models.DateTimeField()
+    
+    # Engagement metrics
+    view_duration_seconds = models.IntegerField(blank=True, null=True)
+    clicked_booking = models.BooleanField(default=False)
+    clicked_favorite = models.BooleanField(default=False)
+    
+    # Context - ViewSource: SEARCH, HOMEPAGE, RECOMMENDATION, FAVORITE, RECENTLY_VIEWED, VOUCHER, DIRECT
+    view_source = models.CharField(max_length=30, blank=True, null=True)
+    search_query = models.CharField(max_length=255, blank=True, null=True)
+    
+    # Hotel snapshot at view time
+    location = models.ForeignKey(Locations, models.DO_NOTHING, blank=True, null=True)
+    hotel_star_rating = models.IntegerField(blank=True, null=True)
+    hotel_type = models.CharField(max_length=20, blank=True, null=True)
+    hotel_price_range = models.CharField(max_length=20, blank=True, null=True)
+    hotel_price_per_night = models.FloatField(blank=True, null=True)
+    hotel_average_rating = models.FloatField(blank=True, null=True)
+
+    class Meta:
+        managed = False
+        db_table = 'view_histories'

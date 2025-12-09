@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Git
+.git/
+.gitignore
+
+# Local files
+*.log
+*.pot
+*.pyc
+db.sqlite3
+*.sqlite3
+
+# Static files (collected separately)
+staticfiles/
+
+# Docs
+*.md
+!requirements.txt
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/

@@ -1,0 +1,22 @@
+# Render.com deployment configuration
+services:
+  - type: web
+    name: tripgo-ai-service
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: DEBUG
+        value: "False"
+      - key: ALLOWED_HOSTS
+        value: ".onrender.com"
+      - key: DATABASE_HOST
+        sync: false  # Nhập thủ công trên Render dashboard
+      - key: DATABASE_PORT
+        value: "3306"
+      - key: DATABASE_NAME
+        sync: false
+      - key: DATABASE_USER
+        sync: false
+      - key: DATABASE_PASSWORD
+        sync: false
+    healthCheckPath: /api/hotels/popular/

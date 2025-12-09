@@ -1,0 +1,16 @@
+# Django
+Django==5.2.7
+djangorestframework==3.16.1
+whitenoise==6.7.0
+
+# Database
+mysqlclient==2.2.6
+
+# ML & Data Processing
+pandas==2.3.3
+numpy==2.3.4
+scikit-learn==1.7.2
+scipy==1.16.2
+
+# Production Server
+gunicorn==23.0.0
