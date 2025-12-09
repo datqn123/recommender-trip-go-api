@@ -4,7 +4,7 @@ djangorestframework==3.16.1
 whitenoise==6.7.0
 
 # Database
-mysqlclient==2.2.6
+PyMySQL==1.1.1
 
 # ML & Data Processing
 pandas==2.3.3

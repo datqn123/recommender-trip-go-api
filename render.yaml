@@ -10,13 +10,13 @@ services:
       - key: ALLOWED_HOSTS
         value: ".onrender.com"
       - key: DATABASE_HOST
-        sync: false  # Nhập thủ công trên Render dashboard
+        value: "gateway01.ap-southeast-1.prod.aws.tidbcloud.com"
       - key: DATABASE_PORT
-        value: "3306"
+        value: "4000"
       - key: DATABASE_NAME
-        sync: false
+        value: "dacn2"
       - key: DATABASE_USER
-        sync: false
+        value: "wWM9yCYvFeQVRm2.root"
       - key: DATABASE_PASSWORD
-        sync: false
+        value: "wfYWzYdqwM5Rcr32"
     healthCheckPath: /api/hotels/popular/
