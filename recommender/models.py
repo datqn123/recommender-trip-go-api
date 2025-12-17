@@ -15,6 +15,7 @@ class Accounts(models.Model):
     status = models.CharField(max_length=20, blank=True, null=True)
     email = models.CharField(unique=True, max_length=100)
     password = models.CharField(max_length=255)
+    cold_start = models.BooleanField(default=True)
 
     class Meta:
         managed = False

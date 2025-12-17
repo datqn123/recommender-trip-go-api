@@ -102,9 +102,67 @@ def get_hybrid_recommendations(
         hybrid_scores.values(), 
         key=lambda x: x['hybrid_score'], 
         reverse=True
-    )[:limit]
+    )[:limit * 2]  # Lấy nhiều hơn để diversity filter
     
-    return sorted_results
+    # 6. Apply diversity
+    diverse_results = apply_diversity(sorted_results, limit)
+    
+    return diverse_results
+
+
+def apply_diversity(recommendations, limit=10, max_per_location=3, max_per_type=4):
+    """
+    Đa dạng hóa kết quả recommendations:
+    - Giới hạn số hotels cùng location
+    - Mix các loại hotels khác nhau (HOTEL, RESORT, HOMESTAY, VILLA)
+    
+    Args:
+        recommendations: List of recommendation dicts
+        limit: Số kết quả cuối cùng
+        max_per_location: Max hotels cùng location
+        max_per_type: Max hotels cùng type
+    """
+    from .models import Hotels
+    
+    if not recommendations:
+        return []
+    
+    # Lấy thông tin location và type của các hotels
+    hotel_ids = [rec['hotel_id'] for rec in recommendations]
+    hotels_info = Hotels.objects.filter(id__in=hotel_ids).select_related('location').values(
+        'id', 'location__name', 'type'
+    )
+    hotel_meta = {h['id']: {'location': h['location__name'], 'type': h['type']} for h in hotels_info}
+    
+    # Apply diversity limits
+    location_count = {}
+    type_count = {}
+    diverse_results = []
+    
+    for rec in recommendations:
+        hid = rec['hotel_id']
+        meta = hotel_meta.get(hid, {})
+        loc = meta.get('location', 'Unknown')
+        hotel_type = meta.get('type', 'HOTEL')
+        
+        # Check location limit
+        if location_count.get(loc, 0) >= max_per_location:
+            continue
+        
+        # Check type limit
+        if type_count.get(hotel_type, 0) >= max_per_type:
+            continue
+        
+        # Add to results
+        diverse_results.append(rec)
+        location_count[loc] = location_count.get(loc, 0) + 1
+        type_count[hotel_type] = type_count.get(hotel_type, 0) + 1
+        
+        # Stop if we have enough
+        if len(diverse_results) >= limit:
+            break
+    
+    return diverse_results
 
 
 def get_personalized_recommendations(user_id, limit=10):
@@ -120,7 +178,7 @@ def get_personalized_recommendations(user_id, limit=10):
         List of personalized recommendations
     """
     from . import collaborative
-    from .models import Hotels
+    from .models import Hotels, HotelImages
     
     # Lấy User-Based CF recommendations
     recs = collaborative.get_user_based_recommendations(user_id, limit)
@@ -135,6 +193,15 @@ def get_personalized_recommendations(user_id, limit=10):
     )
     hotels_dict = {h['id']: h for h in hotels}
     
+    # Lấy thumbnail cho mỗi hotel (caption='Thumbnail')
+    hotel_thumbnails = {}
+    images = HotelImages.objects.filter(
+        hotel_id__in=hotel_ids, 
+        caption='Thumbnail'
+    ).values('hotel_id', 'image_url')
+    for img in images:
+        hotel_thumbnails[img['hotel_id']] = img['image_url']
+    
     results = []
     for rec in recs:
         hotel_info = hotels_dict.get(rec['hotel_id'], {})
@@ -145,6 +212,7 @@ def get_personalized_recommendations(user_id, limit=10):
             'star_rating': hotel_info.get('star_rating'),
             'average_rating': hotel_info.get('average_rating'),
             'location': hotel_info.get('location__name'),
+            'thumbnail': hotel_thumbnails.get(rec['hotel_id']),
             'cf_score': rec['cf_score'],
             'recommendation_type': 'personalized'
         })

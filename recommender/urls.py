@@ -9,6 +9,9 @@ urlpatterns = [
     # Tích hợp hybrid algorithms (Content-Based + Collaborative Filtering)
     path('recommend/smart/<int:user_id>/', views.get_smart_recommendations, name='smart-recommendations'),
     
+    # Real-time Personalization: Track user actions
+    path('user/action/', views.track_user_action, name='track-action'),
+    
     # Admin: Retrain models
     path('model/retrain/', views.retrain_model, name='retrain-model'),
 ]

@@ -1,6 +1,6 @@
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
-from .models import Hotels, HotelsAmenities, Amenities, Locations, HotelViews, ViewHistories, FavoriteHotels, Bookings, HotelReviews, SearchHistory
+from .models import Hotels, HotelsAmenities, Amenities, Locations, HotelViews, ViewHistories, FavoriteHotels, Bookings, HotelReviews, SearchHistory, HotelImages
 from collections import Counter
 import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -144,37 +144,26 @@ def get_recommendations(request, hotel_id):
                                              'price_range', 'type', 'design_style', 'location__parent__name']]
         results = result_df.to_dict('records')
         
-        # Thêm similarity score, similarity_reason và xóa NaN
+        # Lấy thumbnail cho mỗi hotel
+        result_hotel_ids = [r['id'] for r in results]
+        hotel_thumbnails = {}
+        thumbnail_images = HotelImages.objects.filter(
+            hotel_id__in=result_hotel_ids,
+            caption='Thumbnail'
+        ).values('hotel_id', 'image_url')
+        for img in thumbnail_images:
+            hotel_thumbnails[img['hotel_id']] = img['image_url']
+        
+        # Xử lý kết quả
         import math
         for i, result in enumerate(results):
-            result['similarity_score'] = round(float(sim_scores[i][1]), 4)
-            
-            # Tìm lý do giống nhau
-            reasons = []
-            if result.get('location__name') == source_row.get('location__name'):
-                reasons.append(f"Cùng địa điểm: {result.get('location__name')}")
-            elif result.get('location__parent__name') == source_row.get('location__parent__name'):
-                reasons.append(f"Cùng tỉnh/thành: {result.get('location__parent__name')}")
-            
-            if result.get('price_range') == source_row.get('price_range') and result.get('price_range'):
-                reasons.append(f"Cùng phân khúc giá: {result.get('price_range')}")
-            
-            if result.get('star_rating') == source_row.get('star_rating') and result.get('star_rating'):
-                reasons.append(f"Cùng {int(result.get('star_rating'))} sao")
-            
-            if result.get('type') == source_row.get('type') and result.get('type'):
-                reasons.append(f"Cùng loại: {result.get('type')}")
-            
-            if result.get('design_style') == source_row.get('design_style') and result.get('design_style'):
-                reasons.append(f"Cùng phong cách: {result.get('design_style')}")
-            
-            result['similarity_reasons'] = reasons if reasons else ["Tương đồng về mô tả và tiện nghi"]
+            # Thêm thumbnail
+            result['thumbnail'] = hotel_thumbnails.get(result['id'])
             
             # Xóa các field phụ không cần trả về
             del result['price_range']
             del result['type']
             del result['design_style']
-            del result['location__parent__name']
             
             # Thay NaN bằng None để JSON serialize được
             for key, value in list(result.items()):
@@ -212,20 +201,157 @@ def retrain_model(request):
         return Response({"error": str(e)}, status=500)
 
 
+# --- REAL-TIME PERSONALIZATION API ---
+
+@api_view(['POST'])
+def track_user_action(request):
+    """
+    🚀 Real-time Personalization API
+    
+    Java backend gọi API này khi user có action mới.
+    Tự động cập nhật cold_start và CF model.
+    
+    Request Body:
+    {
+        "user_id": 1,
+        "action_type": "view" | "book" | "favorite" | "review",
+        "hotel_id": 123,
+        "metadata": {
+            "view_duration": 120,  // seconds (for view)
+            "rating": 8.5          // (for review)
+        }
+    }
+    """
+    try:
+        from .models import Accounts
+        from . import collaborative
+        
+        data = request.data
+        user_id = data.get('user_id')
+        action_type = data.get('action_type')
+        hotel_id = data.get('hotel_id')
+        metadata = data.get('metadata', {})
+        
+        if not all([user_id, action_type, hotel_id]):
+            return Response({
+                "error": "Missing required fields: user_id, action_type, hotel_id"
+            }, status=400)
+        
+        # Validate action_type
+        valid_actions = ['view', 'book', 'favorite', 'review']
+        if action_type not in valid_actions:
+            return Response({
+                "error": f"Invalid action_type. Must be one of: {valid_actions}"
+            }, status=400)
+        
+        # 1. Cập nhật cold_start = False nếu còn là True
+        cold_start_updated = False
+        try:
+            account = Accounts.objects.get(id=user_id)
+            if account.cold_start:
+                account.cold_start = False
+                account.save()
+                cold_start_updated = True
+        except Accounts.DoesNotExist:
+            return Response({"error": "User not found"}, status=404)
+        
+        # 2. Incremental update CF model
+        cf_updated = False
+        if collaborative.cf_global_data:
+            # Tính rating score dựa trên action_type
+            rating_map = {
+                'view': 2.0 + min(metadata.get('view_duration', 0) / 180, 1.0),  # 2-3
+                'favorite': 4.0,
+                'book': 5.0,
+                'review': metadata.get('rating', 4.0)
+            }
+            rating = rating_map.get(action_type, 2.0)
+            
+            # Update user-item matrix
+            user_item_matrix = collaborative.cf_global_data.get('user_item_matrix')
+            if user_item_matrix is not None:
+                if user_id in user_item_matrix.index:
+                    if hotel_id in user_item_matrix.columns:
+                        # Cập nhật score (lấy max với score hiện tại)
+                        current = user_item_matrix.loc[user_id, hotel_id]
+                        user_item_matrix.loc[user_id, hotel_id] = max(current, rating)
+                        cf_updated = True
+        
+        # 3. Lưu vào view_histories nếu là action view
+        view_history_saved = False
+        if action_type == 'view':
+            from django.utils import timezone
+            
+            # Lấy thông tin hotel để snapshot
+            try:
+                hotel = Hotels.objects.select_related('location').get(id=hotel_id)
+                
+                ViewHistories.objects.create(
+                    account_id=user_id,
+                    hotel_id=hotel_id,
+                    viewed_at=timezone.now(),
+                    view_duration_seconds=metadata.get('view_duration', 0),
+                    clicked_booking=metadata.get('clicked_booking', False),
+                    clicked_favorite=metadata.get('clicked_favorite', False),
+                    view_source=metadata.get('view_source', 'DIRECT'),
+                    search_query=metadata.get('search_query'),
+                    location_id=hotel.location_id if hotel.location else None,
+                    hotel_star_rating=hotel.star_rating,
+                    hotel_type=hotel.type,
+                    hotel_price_range=hotel.price_range,
+                    hotel_price_per_night=hotel.price_per_night_from,
+                    hotel_average_rating=hotel.average_rating
+                )
+                view_history_saved = True
+            except Hotels.DoesNotExist:
+                pass  # Hotel không tồn tại, bỏ qua
+        
+        # 4. Lưu vào favorite_hotels nếu là action favorite
+        favorite_saved = False
+        if action_type == 'favorite':
+            from django.utils import timezone
+            
+            # Dùng get_or_create để tránh duplicate
+            _, created = FavoriteHotels.objects.get_or_create(
+                account_id=user_id,
+                hotel_id=hotel_id,
+                defaults={'created_at': timezone.now()}
+            )
+            favorite_saved = created  # True nếu tạo mới, False nếu đã tồn tại
+        
+        return Response({
+            "status": "success",
+            "user_id": user_id,
+            "action_type": action_type,
+            "hotel_id": hotel_id,
+            "cold_start_updated": cold_start_updated,
+            "cf_model_updated": cf_updated,
+            "view_history_saved": view_history_saved,
+            "favorite_saved": favorite_saved,
+            "message": "Action tracked successfully"
+        })
+        
+    except Exception as e:
+        import traceback
+        return Response({
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }, status=500)
+
+
 # --- PHASE 3: SEARCH-BASED RECOMMENDATIONS ---
 
 def is_cold_start_user(user_id):
     """
     Kiểm tra user có phải cold start không.
-    Cold start = không có dữ liệu ở BẤT KỲ nguồn nào
+    Dựa vào cột cold_start trong bảng accounts
     """
-    has_search = SearchHistory.objects.filter(account_id=user_id).exists()
-    has_views = ViewHistories.objects.filter(account_id=user_id).exists()
-    has_favorites = FavoriteHotels.objects.filter(account_id=user_id).exists()
-    has_bookings = Bookings.objects.filter(user_id=user_id).exists()
-    has_reviews = HotelReviews.objects.filter(user_id=user_id).exists()
-    
-    return not any([has_search, has_views, has_favorites, has_bookings, has_reviews])
+    from .models import Accounts
+    try:
+        account = Accounts.objects.get(id=user_id)
+        return account.cold_start
+    except Accounts.DoesNotExist:
+        return True  # User không tồn tại -> coi như cold start
 
 
 def get_popular_hotels_list(limit=10):
@@ -315,6 +441,17 @@ def get_popular_hotels_list(limit=10):
     # 5. Sort by hybrid popularity score
     scored_hotels.sort(key=lambda x: x['popularity_score'], reverse=True)
     
+    # 6. Lấy thumbnails cho popular hotels
+    top_hotels = scored_hotels[:limit]
+    hotel_ids = [item['hotel'].id for item in top_hotels]
+    hotel_thumbnails = {}
+    images = HotelImages.objects.filter(
+        hotel_id__in=hotel_ids,
+        caption='Thumbnail'
+    ).values('hotel_id', 'image_url')
+    for img in images:
+        hotel_thumbnails[img['hotel_id']] = img['image_url']
+    
     return [{
         'id': item['hotel'].id,
         'name': item['hotel'].name,
@@ -323,9 +460,8 @@ def get_popular_hotels_list(limit=10):
         'average_rating': item['hotel'].average_rating,
         'total_reviews': item['hotel'].total_reviews,
         'location': item['hotel'].location.name if item['hotel'].location else None,
-        'popularity_score': item['popularity_score'],
-        'score_breakdown': item['breakdown']
-    } for item in scored_hotels[:limit]]
+        'thumbnail': hotel_thumbnails.get(item['hotel'].id)
+    } for item in top_hotels]
 
 @api_view(['GET'])
 def get_smart_recommendations(request, user_id):
@@ -431,6 +567,15 @@ def get_smart_recommendations(request, user_id):
             )
             hotels_dict = {h['id']: h for h in hotels}
             
+            # Lấy thumbnail cho mỗi hotel
+            hotel_thumbnails = {}
+            images = HotelImages.objects.filter(
+                hotel_id__in=hotel_ids,
+                caption='Thumbnail'
+            ).values('hotel_id', 'image_url')
+            for img in images:
+                hotel_thumbnails[img['hotel_id']] = img['image_url']
+            
             for rec in sorted_recs:
                 hotel_info = hotels_dict.get(rec['hotel_id'], {})
                 rec['name'] = hotel_info.get('name')
@@ -439,6 +584,7 @@ def get_smart_recommendations(request, user_id):
                 rec['average_rating'] = hotel_info.get('average_rating')
                 rec['total_reviews'] = hotel_info.get('total_reviews')
                 rec['location'] = hotel_info.get('location__name')
+                rec['thumbnail'] = hotel_thumbnails.get(rec['hotel_id'])
                 rec['hybrid_score'] = round(rec['hybrid_score'], 4)
                 rec['content_score'] = round(rec['content_score'], 4)
                 rec['collab_score'] = round(rec['collab_score'], 4)
