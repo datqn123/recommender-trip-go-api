@@ -1,6 +1,7 @@
 # Django
 Django==5.2.7
 djangorestframework==3.16.1
+django-cors-headers==4.6.0
 whitenoise==6.7.0
 
 # Database
