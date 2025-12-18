@@ -1,13 +1,39 @@
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
-from .models import Hotels, HotelsAmenities, Amenities, Locations, HotelViews, ViewHistories, FavoriteHotels, Bookings, HotelReviews, SearchHistory, HotelImages
+from .models import Hotels, HotelsAmenities, Amenities, Locations, HotelViews, ViewHistories, FavoriteHotels, Bookings, HotelReviews, SearchHistory, HotelImages, Rooms
 from collections import Counter
 import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import linear_kernel
+from django.db.models import Min
 
 # --- BIẾN TOÀN CỤC ĐỂ LƯU MODEL (CACHE) ---
 global_data = {}
+
+
+def get_min_room_prices(hotel_ids):
+    """
+    Helper: Lấy giá phòng thấp nhất cho mỗi hotel
+    
+    Args:
+        hotel_ids: List of hotel IDs
+    
+    Returns:
+        Dict {hotel_id: min_price}
+    """
+    if not hotel_ids:
+        return {}
+    
+    # Query lấy giá phòng thấp nhất cho mỗi hotel
+    min_prices = Rooms.objects.filter(
+        hotel_id__in=hotel_ids,
+        price__isnull=False
+    ).values('hotel_id').annotate(
+        min_price=Min('price')
+    )
+    
+    return {item['hotel_id']: item['min_price'] for item in min_prices}
+
 
 def get_hotel_amenities():
     # Lấy amenity của từng hotel nối thành 1 chuỗi có danh key(hotel_id):value(string)
@@ -154,11 +180,17 @@ def get_recommendations(request, hotel_id):
         for img in thumbnail_images:
             hotel_thumbnails[img['hotel_id']] = img['image_url']
         
+        # Lấy giá phòng thấp nhất cho mỗi hotel
+        min_room_prices = get_min_room_prices(result_hotel_ids)
+        
         # Xử lý kết quả
         import math
         for i, result in enumerate(results):
             # Thêm thumbnail
             result['thumbnail'] = hotel_thumbnails.get(result['id'])
+            
+            # Thêm min_room_price
+            result['min_room_price'] = min_room_prices.get(result['id'])
             
             # Xóa các field phụ không cần trả về
             del result['price_range']
@@ -452,6 +484,9 @@ def get_popular_hotels_list(limit=10):
     for img in images:
         hotel_thumbnails[img['hotel_id']] = img['image_url']
     
+    # 7. Lấy giá phòng thấp nhất cho popular hotels
+    min_room_prices = get_min_room_prices(hotel_ids)
+    
     return [{
         'id': item['hotel'].id,
         'name': item['hotel'].name,
@@ -460,7 +495,8 @@ def get_popular_hotels_list(limit=10):
         'average_rating': item['hotel'].average_rating,
         'total_reviews': item['hotel'].total_reviews,
         'location': item['hotel'].location.name if item['hotel'].location else None,
-        'thumbnail': hotel_thumbnails.get(item['hotel'].id)
+        'thumbnail': hotel_thumbnails.get(item['hotel'].id),
+        'min_room_price': min_room_prices.get(item['hotel'].id)
     } for item in top_hotels]
 
 @api_view(['GET'])
@@ -576,6 +612,9 @@ def get_smart_recommendations(request, user_id):
             for img in images:
                 hotel_thumbnails[img['hotel_id']] = img['image_url']
             
+            # Lấy giá phòng thấp nhất cho mỗi hotel
+            min_room_prices = get_min_room_prices(hotel_ids)
+            
             for rec in sorted_recs:
                 hotel_info = hotels_dict.get(rec['hotel_id'], {})
                 rec['name'] = hotel_info.get('name')
@@ -585,6 +624,7 @@ def get_smart_recommendations(request, user_id):
                 rec['total_reviews'] = hotel_info.get('total_reviews')
                 rec['location'] = hotel_info.get('location__name')
                 rec['thumbnail'] = hotel_thumbnails.get(rec['hotel_id'])
+                rec['min_room_price'] = min_room_prices.get(rec['hotel_id'])
                 rec['hybrid_score'] = round(rec['hybrid_score'], 4)
                 rec['content_score'] = round(rec['content_score'], 4)
                 rec['collab_score'] = round(rec['collab_score'], 4)

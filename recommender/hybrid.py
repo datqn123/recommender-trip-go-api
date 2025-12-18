@@ -178,7 +178,8 @@ def get_personalized_recommendations(user_id, limit=10):
         List of personalized recommendations
     """
     from . import collaborative
-    from .models import Hotels, HotelImages
+    from .models import Hotels, HotelImages, Rooms
+    from django.db.models import Min
     
     # Lấy User-Based CF recommendations
     recs = collaborative.get_user_based_recommendations(user_id, limit)
@@ -202,6 +203,15 @@ def get_personalized_recommendations(user_id, limit=10):
     for img in images:
         hotel_thumbnails[img['hotel_id']] = img['image_url']
     
+    # Lấy giá phòng thấp nhất cho mỗi hotel
+    min_prices = Rooms.objects.filter(
+        hotel_id__in=hotel_ids,
+        price__isnull=False
+    ).values('hotel_id').annotate(
+        min_price=Min('price')
+    )
+    hotel_min_prices = {item['hotel_id']: item['min_price'] for item in min_prices}
+    
     results = []
     for rec in recs:
         hotel_info = hotels_dict.get(rec['hotel_id'], {})
@@ -213,6 +223,7 @@ def get_personalized_recommendations(user_id, limit=10):
             'average_rating': hotel_info.get('average_rating'),
             'location': hotel_info.get('location__name'),
             'thumbnail': hotel_thumbnails.get(rec['hotel_id']),
+            'min_room_price': hotel_min_prices.get(rec['hotel_id']),
             'cf_score': rec['cf_score'],
             'recommendation_type': 'personalized'
         })
