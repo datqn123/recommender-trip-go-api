@@ -376,14 +376,45 @@ def track_user_action(request):
 def is_cold_start_user(user_id):
     """
     Kiểm tra user có phải cold start không.
-    Dựa vào cột cold_start trong bảng accounts
+    Cold start = không có đủ dữ liệu behavior để recommend
+    
+    Kiểm tra thực tế có data từ:
+    - ViewHistories
+    - FavoriteHotels  
+    - Bookings
+    - HotelReviews
+    
+    Nếu có ít nhất 1 loại dữ liệu -> không phải cold start
+    Đồng thời cập nhật cột cold_start trong accounts nếu phát hiện có data
     """
-    from .models import Accounts
+    from .models import Accounts, ViewHistories, FavoriteHotels, Bookings, HotelReviews
+    
     try:
         account = Accounts.objects.get(id=user_id)
-        return account.cold_start
     except Accounts.DoesNotExist:
         return True  # User không tồn tại -> coi như cold start
+    
+    # Nếu cold_start đã = False trong DB thì không cần check thêm
+    if not account.cold_start:
+        return False
+    
+    # Kiểm tra có dữ liệu behavior không
+    has_views = ViewHistories.objects.filter(account_id=user_id).exists()
+    has_favorites = FavoriteHotels.objects.filter(account_id=user_id).exists()
+    has_bookings = Bookings.objects.filter(user_id=user_id).exists()
+    has_reviews = HotelReviews.objects.filter(user_id=user_id).exists()
+    
+    # Có ít nhất 1 loại dữ liệu -> không phải cold start
+    has_data = has_views or has_favorites or has_bookings or has_reviews
+    
+    if has_data:
+        # Cập nhật cold_start = False trong DB
+        account.cold_start = False
+        account.save(update_fields=['cold_start'])
+        print(f"✅ User {user_id} không còn cold-start (có data: views={has_views}, favorites={has_favorites}, bookings={has_bookings}, reviews={has_reviews})")
+        return False
+    
+    return True  # Vẫn là cold start
 
 
 def get_popular_hotels_list(limit=10):
