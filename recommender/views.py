@@ -300,14 +300,12 @@ def track_user_action(request):
             rating = rating_map.get(action_type, 2.0)
             
             # Update user-item matrix
-            user_item_matrix = collaborative.cf_global_data.get('user_item_matrix')
-            if user_item_matrix is not None:
-                if user_id in user_item_matrix.index:
-                    if hotel_id in user_item_matrix.columns:
-                        # Cập nhật score (lấy max với score hiện tại)
-                        current = user_item_matrix.loc[user_id, hotel_id]
-                        user_item_matrix.loc[user_id, hotel_id] = max(current, rating)
-                        cf_updated = True
+            # Note: With Sparse Matrix implementation, incremental update is complex.
+            # We rely on periodic retraining or assume the new action will be picked up next train.
+            # Ideally, we could add to a 'recent_actions' buffer.
+            # For now, we simply skip immediate model update to ensure stability.
+            pass
+
         
         # 3. Lưu vào view_histories nếu là action view
         view_history_saved = False
@@ -440,14 +438,19 @@ def get_popular_hotels_list(limit=10):
     cf_hotel_scores = {}
     if collaborative.cf_global_data:
         # Lấy các hotels được nhiều users yêu thích (từ user-item matrix)
-        user_item_matrix = collaborative.cf_global_data.get('user_item_matrix')
-        if user_item_matrix is not None:
+        # Lấy các hotels được nhiều users yêu thích (từ user-item matrix)
+        sparse_matrix = collaborative.cf_global_data.get('user_item_matrix_sparse')
+        hotel_ids = collaborative.cf_global_data.get('hotel_ids')
+        
+        if sparse_matrix is not None and hotel_ids:
             # Tính tổng ratings cho mỗi hotel = popularity dựa trên CF
-            hotel_popularity = user_item_matrix.sum(axis=0)  # Sum over all users
-            max_pop = hotel_popularity.max() if hotel_popularity.max() > 0 else 1
+            # sum(axis=0) returns a matrix [[col1, col2, ...]]
+            hotel_popularity = sparse_matrix.sum(axis=0).tolist()[0]
+            max_pop = max(hotel_popularity) if hotel_popularity else 1
             
-            for hotel_id in user_item_matrix.columns:
-                cf_hotel_scores[hotel_id] = float(hotel_popularity[hotel_id]) / max_pop
+            if max_pop > 0:
+                for idx, hotel_id in enumerate(hotel_ids):
+                    cf_hotel_scores[hotel_id] = float(hotel_popularity[idx]) / max_pop
     
     # 3. Lấy booking/view/favorite counts
     booking_counts = dict(
