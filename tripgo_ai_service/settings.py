@@ -142,6 +142,7 @@ CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
     "https://tripgo-qmdo.onrender.com",
+    "https://trip-go-eight.vercel.app",
 ]
 
 # Cho phép gửi cookies/credentials (nếu cần)
